@@ -1,17 +1,10 @@
-import streamlit as st
+from flask import Flask, render_template, Response
 import cv2
-from ultralytics import YOLO
-from PIL import Image
-import numpy as np
-from datetime import datetime
-import time
-import smtplib
+from main import detect_weapon
 import ssl
+import smtplib
 from email.message import EmailMessage
 
-# --------------------------
-# Email Alert Function with Image Attachment
-# --------------------------
 def send_email(detected_obj, confidence, timestamp, image_path):
     sender_email = "arkjakki@gmail.com"             # 🔁 Your email
     receiver_email = "arkjakki@gmail.com"           # 🔁 Receiver email
@@ -27,87 +20,53 @@ Time: {timestamp}
 Image from the moment is attached below.
 """
 
-    em = EmailMessage()
-    em['From'] = sender_email
-    em['To'] = receiver_email
-    em['Subject'] = subject
-    em.set_content(body)
 
-    # Attach the saved image
-    with open(image_path, 'rb') as img:
-        em.add_attachment(img.read(), maintype='image', subtype='jpeg', filename=image_path)
-
+def send_alert_email(sender_email, receiver_email, app_password, subject, body, image_path=None):
     try:
+        em = EmailMessage()
+        em["From"] = sender_email
+        em["To"] = receiver_email
+        em["Subject"] = subject
+        em.set_content(body)
+
+        # Attach image if path is provided
+        if image_path:
+            with open(image_path, "rb") as img:
+                em.add_attachment(img.read(), maintype="image", subtype="jpeg", filename="alert.jpg")
+
+        # Secure connection
         context = ssl.create_default_context()
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as smtp:
             smtp.login(sender_email, app_password)
             smtp.send_message(em)
-        st.success("📧 Alert email sent with image!")
+
+        print("📧 Alert email sent with image!")
+
     except Exception as e:
-        st.error(f"❌ Email failed: {e}")
+        print(f"❌ Email failed: {e}")
 
-# --------------------------
-# Streamlit UI
-# --------------------------
-st.title("🛡️ Weapon Detection System with Alerts")
+app = Flask(__name__)
+camera = cv2.VideoCapture(0)
 
-model = YOLO("yolov8n.pt")  # Use your trained model (or 'best.pt')
-
-run = st.checkbox("Start Webcam")
-frame_placeholder = st.empty()
-alert_placeholder = st.empty()
-
-dangerous_objects = {"knife", "scissors", "gun", "grenade"}
-
-if run:
-    cap = cv2.VideoCapture(0)
-
-    while run:
-        ret, frame = cap.read()
-        if not ret:
-            st.warning("⚠️ Webcam not accessible.")
+def generate_frames():
+    while True:
+        success, frame = camera.read()
+        if not success:
             break
+        else:
+            frame = detect_weapon(frame)
+            _, buffer = cv2.imencode('.jpg', frame)
+            frame = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
-        results = model(frame, verbose=False)
-        annotated_frame = results[0].plot()
-        found = False
+@app.route('/')
+def index():
+    return render_template('index.html')
 
-        for box in results[0].boxes:
-            cls = int(box.cls[0])
-            conf = float(box.conf[0])
-            obj = results[0].names[cls]
+@app.route('/video')
+def video():
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-            if obj.lower() in dangerous_objects:
-                found = True
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                if conf > 0.5:
-                    alert_placeholder.warning(
-                        f"🚨 Detected '{obj}' with {conf:.2f} confidence at {timestamp}"
-                    )
-
-                    with open("detection_log.txt", "a") as log_file:
-                        log_file.write(f"{timestamp} - {obj} detected (Confidence: {conf:.2f})\n")
-
-                    # Save the current frame
-                    img_filename = f"alert_{timestamp.replace(':', '-')}.jpg"
-                    cv2.imwrite(img_filename, frame)
-
-                    # Send email with image
-                    send_email(obj, conf, timestamp, img_filename)
-
-                else:
-                    alert_placeholder.info(
-                        f"⚠️ '{obj}' detected with low confidence ({conf:.2f}). Not logged as threat."
-                    )
-                break
-
-        if not found:
-            alert_placeholder.info("✅ No threats detected.")
-
-        frame_placeholder.image(annotated_frame, channels="BGR")
-        time.sleep(0.1)
-
-    cap.release()
-else:
-    st.info("Click the checkbox above to start detection.")
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
